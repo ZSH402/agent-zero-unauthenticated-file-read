@@ -203,7 +203,7 @@ and the endpoint fails closed.
   ingress would narrow the exposure.
 - `/root/.ssh/id_rsa` did not exist in the test environment, so `/etc/passwd` is the sample.
 
-## Timelines
+## Timeline
 
 - 2026-11-05 — chain identified in upstream `main`
 - 2026-11-05 — end-to-end verification
